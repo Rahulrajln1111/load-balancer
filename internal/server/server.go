@@ -22,6 +22,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	if b == nil {
 		http.Error(w, "no healthy backen", http.StatusServiceUnavailable)
+		return
 	}
 
 	b.IncInFlight()
