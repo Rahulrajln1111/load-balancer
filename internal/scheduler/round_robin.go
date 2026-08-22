@@ -5,16 +5,12 @@ import (
 	"sync/atomic"
 )
 
-type Scheduler interface {
-	Next() *backend.Backend
-}
-
 type RoundRobin struct {
 	backends []*backend.Backend
 	next     atomic.Uint64
 }
 
-func New(backends []*backend.Backend) RoundRobin {
+func NewRrScheduler(backends []*backend.Backend) RoundRobin {
 	return RoundRobin{
 		backends: backends,
 	}
