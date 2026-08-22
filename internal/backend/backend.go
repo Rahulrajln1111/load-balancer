@@ -25,7 +25,7 @@ func New(target *url.URL, proxy *httputil.ReverseProxy) *Backend {
 	return b
 }
 
-func (b *Backend) GetAlive() bool {
+func (b *Backend) IsAlive() bool {
 	return b.Alive.Load()
 }
 
@@ -51,8 +51,4 @@ func (b *Backend) TotalRequests() uint64 {
 
 func (b *Backend) ActiveRequest() int64 {
 	return b.InFlight.Load()
-}
-
-func (b *Backend) IsAlive() bool {
-	return b.Alive.Load()
 }

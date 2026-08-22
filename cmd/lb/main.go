@@ -63,6 +63,10 @@ func main() {
 
 	log.Println("Load Balancer listening on :8080")
 
-	log.Fatal(httpServer.ListenAndServe())
+	if err := httpServer.ListenAndServe(); err != nil &&
+		err != http.ErrServerClosed {
+
+		log.Fatal(err)
+	}
 
 }

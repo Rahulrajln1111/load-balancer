@@ -27,7 +27,7 @@ func New(b []*backend.Backend, interval time.Duration) *Checker {
 func (c *Checker) probe(ctx context.Context, b *backend.Backend) {
 	url := b.URL.String() + "/health"
 
-	timoutctx, cancel := context.WithTimeout(ctx, 500*time.Microsecond)
+	timoutctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 
 	defer cancel()
 
@@ -38,9 +38,7 @@ func (c *Checker) probe(ctx context.Context, b *backend.Backend) {
 		return
 	}
 
-
-	resp,err:= c.client.Do(req)
-
+	resp, err := c.client.Do(req)
 
 	if err != nil {
 		b.SetAlive(false)
