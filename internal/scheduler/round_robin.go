@@ -10,8 +10,8 @@ type RoundRobin struct {
 	next     atomic.Uint64
 }
 
-func NewRrScheduler(backends []*backend.Backend) RoundRobin {
-	return RoundRobin{
+func NewRrScheduler(backends []*backend.Backend) *RoundRobin {
+	return &RoundRobin{
 		backends: backends,
 	}
 }
