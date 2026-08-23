@@ -10,11 +10,21 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync/atomic"
 )
+
+// LB-level counters (spec: Total/Success/Failed/BackendErrors).
+type LBMetrics struct {
+	Total         atomic.Uint64
+	Success       atomic.Uint64
+	Failed        atomic.Uint64
+	BackendErrors atomic.Uint64
+}
 
 type Server struct {
 	scheduler Scheduler
 	backends  []*backend.Backend
+	metrics   LBMetrics
 }
 
 type attemptW struct {
@@ -50,12 +60,31 @@ func New(sch Scheduler, backends []*backend.Backend) *Server {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	mux.HandleFunc("/lb/health", s.handleLBHealth)
+	mux.HandleFunc("/lb/status", s.handleStats)
+	mux.HandleFunc("/lb/metrics", s.handleMetrics)
 	mux.HandleFunc("/stats", s.handleStats)
 	mux.HandleFunc("/", s.handleProxy)
+}
 
+func (s *Server) handleLBHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write([]byte("ok"))
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]uint64{
+		"total":          s.metrics.Total.Load(),
+		"success":        s.metrics.Success.Load(),
+		"failed":         s.metrics.Failed.Load(),
+		"backend_errors": s.metrics.BackendErrors.Load(),
+	})
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
+
+	s.metrics.Total.Add(1)
 
 	maxAttempt := 1
 
@@ -71,6 +100,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		b := s.scheduler.Next()
 
 		if b == nil {
+			s.metrics.Failed.Add(1)
 			http.Error(w, "no healthy backend available", http.StatusServiceUnavailable)
 			return
 		}
@@ -86,13 +116,19 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			b.Proxy.ServeHTTP(aw, r)
 		}()
 
+		if holder.Err != nil {
+			s.metrics.BackendErrors.Add(1)
+		}
+
 		if holder.Err == nil || aw.wrote {
+			s.metrics.Success.Add(1)
 			return
 		}
 
-		log.Printf("retrying...")
+		log.Printf("retrying %s: %v", b.URL, holder.Err)
 
 	}
+	s.metrics.Failed.Add(1)
 	http.Error(w, "backend unavailable", http.StatusBadGateway)
 }
 
