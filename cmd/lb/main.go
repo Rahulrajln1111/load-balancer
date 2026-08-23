@@ -14,9 +14,9 @@ import (
 )
 
 var backendURLs = []string{
-	"http://localhost:2290",
-	"http://localhost:2291",
-	"http://localhost:2292",
+	"http://10.1.75.51:3290",
+	"http://10.1.75.51:3291",
+	"http://10.1.75.51:3292",
 }
 
 func createBackends() []*backend.Backend {
@@ -43,7 +43,7 @@ func main() {
 
 	rr := scheduler.NewRrScheduler(backends)
 
-	srvc := server.New(rr)
+	srvc := server.New(rr, backends)
 
 	mux := http.NewServeMux()
 
@@ -57,11 +57,11 @@ func main() {
 	go checker.Run(rootCtx)
 
 	httpServer := &http.Server{
-		Addr:    ":8080",
+		Addr:    ":3000",
 		Handler: mux,
 	}
 
-	log.Println("Load Balancer listening on :8080")
+	log.Println("Load Balancer listening on :3000")
 
 	if err := httpServer.ListenAndServe(); err != nil &&
 		err != http.ErrServerClosed {

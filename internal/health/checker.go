@@ -2,10 +2,16 @@ package health
 
 import (
 	"context"
+	"io"
 	"load-balancer/internal/backend"
 	"net/http"
 	"sync"
 	"time"
+)
+
+const (
+	probeTimeout       = 2 * time.Second
+	failuresBeforeDown = 3
 )
 
 type Checker struct {
@@ -17,9 +23,7 @@ type Checker struct {
 func New(b []*backend.Backend, interval time.Duration) *Checker {
 	return &Checker{
 		backends: b,
-		client: &http.Client{
-			Timeout: 500 * time.Millisecond,
-		},
+		client:   &http.Client{},
 		interval: interval,
 	}
 }
@@ -27,27 +31,28 @@ func New(b []*backend.Backend, interval time.Duration) *Checker {
 func (c *Checker) probe(ctx context.Context, b *backend.Backend) {
 	url := b.URL.String() + "/health"
 
-	timoutctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	timoutctx, cancel := context.WithTimeout(ctx, probeTimeout)
 
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(timoutctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(timoutctx, http.MethodGet, url, nil)
 
 	if err != nil {
-		b.SetAlive(false)
+		b.RecordProbe(false, failuresBeforeDown)
 		return
 	}
 
 	resp, err := c.client.Do(req)
 
 	if err != nil {
-		b.SetAlive(false)
+		b.RecordProbe(false, failuresBeforeDown)
 		return
 	}
 
 	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
 
-	b.SetAlive(resp.StatusCode == http.StatusOK)
+	b.RecordProbe(resp.StatusCode == http.StatusOK, failuresBeforeDown)
 }
 
 func (c *Checker) CheckAll(ctx context.Context) {

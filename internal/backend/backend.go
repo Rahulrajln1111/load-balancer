@@ -7,9 +7,9 @@ import (
 )
 
 type Backend struct {
-	URL   *url.URL
-	Proxy *httputil.ReverseProxy
-
+	URL      *url.URL
+	Proxy    *httputil.ReverseProxy
+	Failures atomic.Int64
 	Alive    atomic.Bool
 	InFlight atomic.Int64
 	Requests atomic.Uint64
@@ -23,6 +23,17 @@ func New(target *url.URL, proxy *httputil.ReverseProxy) *Backend {
 	b.Alive.Store(true)
 
 	return b
+}
+
+func (b *Backend) RecordProbe(ok bool, failAfter int64) {
+	if ok {
+		b.Failures.Store(0)
+		b.Alive.Store(true)
+		return
+	}
+	if b.Failures.Add(1) >= failAfter {
+		b.Alive.Store(false)
+	}
 }
 
 func (b *Backend) IsAlive() bool {
