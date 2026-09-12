@@ -44,6 +44,16 @@ func (s *PerformanceScheduler) Next() *backend.Backend {
 		return candidates[0]
 	}
 
+	// Epsilon-greedy exploration (5%): serve a random alive backend.
+	// Pure P2C starves a backend whose score is stale-high (it loses
+	// every comparison, gets no samples, so its average never corrects
+	// — a feedback lockout). Exploration guarantees every alive backend
+	// is continuously sampled, keeping scores truthful. Dead backends
+	// stay excluded: candidates are alive-only.
+	if rand.Intn(20) == 0 {
+		return candidates[rand.Intn(len(candidates))]
+	}
+
 	i1 := rand.Intn(len(candidates))
 	i2 := rand.Intn(len(candidates))
 	for i2 == i1 {
