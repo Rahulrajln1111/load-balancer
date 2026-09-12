@@ -16,9 +16,9 @@ func CtxKey() ctxKey { return ctxKey{} }
 
 var transport = &http.Transport{
 	MaxIdleConns:          1000,
-	MaxIdleConnsPerHost:   200,
+	MaxIdleConnsPerHost:   500,
 	IdleConnTimeout:       90 * time.Second,
-	ResponseHeaderTimeout: 10 * time.Second,
+	ResponseHeaderTimeout: 25 * time.Second,
 }
 
 func New(target *url.URL) *httputil.ReverseProxy {

@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	probeTimeout       = 2 * time.Second
-	failuresBeforeDown = 3
+	probeTimeout       = 4 * time.Second
+	failuresBeforeDown = 5
 )
 
 type Checker struct {
