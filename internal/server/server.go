@@ -130,7 +130,12 @@ func (s *Server) forwardToBackend(w http.ResponseWriter, r *http.Request) {
 	}
 	if holder.Err == nil || aw.wrote {
 		s.metrics.Success.Add(1)
+		return
 	}
+	// Proxy failed before writing anything: explicit 502 so the
+	// client never mistakes this for an accepted (2xx) request.
+	s.metrics.Failed.Add(1)
+	http.Error(w, "backend unavailable", http.StatusBadGateway)
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {

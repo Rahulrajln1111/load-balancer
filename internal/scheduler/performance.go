@@ -30,7 +30,14 @@ func (s *PerformanceScheduler) Next() *backend.Backend {
 	}
 
 	if len(candidates) == 0 {
-		return s.leastLoadedAlive()
+		if best := s.leastLoadedAlive(); best != nil {
+			return best
+		}
+		// Last resort: every backend is marked down (usually probe
+		// flapping under extreme load, not real death). Route to the
+		// least-loaded one anyway instead of failing fast with 503 —
+		// a slow success beats a certain rejection.
+		return s.leastLoadedAny()
 	}
 
 	if len(candidates) == 1 {
@@ -57,6 +64,16 @@ func (s *PerformanceScheduler) leastLoadedAlive() *backend.Backend {
 		if !b.IsAlive() {
 			continue
 		}
+		if best == nil || b.LoadScore() < best.LoadScore() {
+			best = b
+		}
+	}
+	return best
+}
+
+func (s *PerformanceScheduler) leastLoadedAny() *backend.Backend {
+	var best *backend.Backend
+	for _, b := range s.backends {
 		if best == nil || b.LoadScore() < best.LoadScore() {
 			best = b
 		}
