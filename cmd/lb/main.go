@@ -10,18 +10,35 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"time"
 )
 
-var backendURLs = []string{
+var defaultBackendURLs = []string{
 	"http://10.1.75.51:3290",
 	"http://10.1.75.51:3291",
 	"http://10.1.75.51:3292",
 }
 
+func backendURLs() []string {
+	if v := os.Getenv("LB_BACKENDS"); v != "" {
+		var out []string
+		for _, p := range strings.Split(v, ",") {
+			if s := strings.TrimSpace(p); s != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return defaultBackendURLs
+}
+
 func createBackends() []*backend.Backend {
 	var backends []*backend.Backend
-	for _, raw := range backendURLs {
+	for _, raw := range backendURLs() {
 
 		target, err := url.Parse(raw)
 
@@ -41,9 +58,9 @@ func createBackends() []*backend.Backend {
 func main() {
 	backends := createBackends()
 
-	rr := scheduler.NewRrScheduler(backends)
+	sch := scheduler.NewPerformanceScheduler(backends)
 
-	srvc := server.New(rr, backends)
+	srvc := server.New(sch, backends)
 
 	mux := http.NewServeMux()
 
