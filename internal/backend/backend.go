@@ -74,5 +74,6 @@ func (b *Backend) AvgResponseTime() int64 {
 }
 
 func (b *Backend) LoadScore() int64 {
-	return b.ActiveRequest() + b.AvgResponseTime()/100
+	// Weight: active requests matter more for concurrency control
+	return b.ActiveRequest()*2 + b.AvgResponseTime()/200
 }

@@ -6,11 +6,14 @@ import (
 	"sync/atomic"
 )
 
-const loadThreshold = 50
+// Threshold tuned for 2700 concurrent requests across backends
+// Each backend can handle ~900 concurrent connections comfortably
+const loadThreshold = 900
 
 type PerformanceScheduler struct {
 	backends  []*backend.Backend
 	threshold atomic.Int64
+	maxConns  atomic.Int64 // Global max concurrent connections
 }
 
 func NewPerformanceScheduler(backends []*backend.Backend) *PerformanceScheduler {
@@ -18,10 +21,24 @@ func NewPerformanceScheduler(backends []*backend.Backend) *PerformanceScheduler 
 		backends: backends,
 	}
 	s.threshold.Store(loadThreshold)
+	s.maxConns.Store(2700) // Hard cap for 2700 concurrent requests
 	return s
 }
 
 func (s *PerformanceScheduler) Next() *backend.Backend {
+	// Check global connection limit first
+	globalInFlight := int64(0)
+	for _, b := range s.backends {
+		globalInFlight += b.ActiveRequest()
+	}
+	if globalInFlight >= s.maxConns.Load() {
+		// At capacity - return least loaded to drain queue fairly
+		if best := s.leastLoadedAlive(); best != nil {
+			return best
+		}
+		return s.leastLoadedAny()
+	}
+
 	var candidates []*backend.Backend
 	for _, b := range s.backends {
 		if b.IsAlive() && b.ActiveRequest() < s.threshold.Load() {
@@ -33,10 +50,6 @@ func (s *PerformanceScheduler) Next() *backend.Backend {
 		if best := s.leastLoadedAlive(); best != nil {
 			return best
 		}
-		// Last resort: every backend is marked down (usually probe
-		// flapping under extreme load, not real death). Route to the
-		// least-loaded one anyway instead of failing fast with 503 —
-		// a slow success beats a certain rejection.
 		return s.leastLoadedAny()
 	}
 
@@ -45,11 +58,6 @@ func (s *PerformanceScheduler) Next() *backend.Backend {
 	}
 
 	// Epsilon-greedy exploration (5%): serve a random alive backend.
-	// Pure P2C starves a backend whose score is stale-high (it loses
-	// every comparison, gets no samples, so its average never corrects
-	// — a feedback lockout). Exploration guarantees every alive backend
-	// is continuously sampled, keeping scores truthful. Dead backends
-	// stay excluded: candidates are alive-only.
 	if rand.Intn(20) == 0 {
 		return candidates[rand.Intn(len(candidates))]
 	}

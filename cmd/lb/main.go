@@ -66,7 +66,8 @@ func main() {
 
 	srvc.Register(mux)
 
-	checker := health.New(backends, time.Second*2)
+	// Faster health check interval for better responsiveness under load
+	checker := health.New(backends, time.Second*1)
 
 	rootCtx, stopBackgWorker := context.WithCancel(context.Background())
 

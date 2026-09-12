@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	probeTimeout       = 4 * time.Second
-	failuresBeforeDown = 5
+	probeTimeout       = 2 * time.Second // Faster timeout for quicker detection
+	failuresBeforeDown = 3                // Fewer failures before marking down
 )
 
 type Checker struct {
@@ -23,7 +23,9 @@ type Checker struct {
 func New(b []*backend.Backend, interval time.Duration) *Checker {
 	return &Checker{
 		backends: b,
-		client:   &http.Client{},
+		client: &http.Client{
+			Timeout: 3 * time.Second,
+		},
 		interval: interval,
 	}
 }
@@ -32,18 +34,15 @@ func (c *Checker) probe(ctx context.Context, b *backend.Backend) {
 	url := b.URL.String() + "/health"
 
 	timoutctx, cancel := context.WithTimeout(ctx, probeTimeout)
-
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(timoutctx, http.MethodGet, url, nil)
-
 	if err != nil {
 		b.RecordProbe(false, failuresBeforeDown)
 		return
 	}
 
 	resp, err := c.client.Do(req)
-
 	if err != nil {
 		b.RecordProbe(false, failuresBeforeDown)
 		return
@@ -69,7 +68,6 @@ func (c *Checker) CheckAll(ctx context.Context) {
 }
 
 func (c *Checker) Run(ctx context.Context) {
-
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 	for {

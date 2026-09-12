@@ -171,7 +171,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			defer b.DecInFlight()
 			b.Proxy.ServeHTTP(aw, r)
 		}()
-		b.RecordResponseTime(time.Since(start))
+		elapsed := time.Since(start)
+		b.RecordResponseTime(elapsed)
 
 		if holder.Err != nil {
 			s.metrics.BackendErrors.Add(1)
