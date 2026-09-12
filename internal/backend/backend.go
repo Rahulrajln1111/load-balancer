@@ -16,6 +16,7 @@ type Backend struct {
 	Requests      atomic.Uint64
 	TotalRespTime atomic.Int64
 	ResponseCount atomic.Uint64
+	EwmaRespTime  atomic.Int64
 }
 
 func New(target *url.URL, proxy *httputil.ReverseProxy) *Backend {
@@ -48,16 +49,28 @@ func (b *Backend) TotalRequests() uint64 { return b.Requests.Load() }
 func (b *Backend) ActiveRequest() int64  { return b.InFlight.Load() }
 
 func (b *Backend) RecordResponseTime(d time.Duration) {
-	b.TotalRespTime.Add(d.Milliseconds())
+	ms := d.Milliseconds()
+	b.TotalRespTime.Add(ms)
 	b.ResponseCount.Add(1)
+	// EWMA (alpha = 0.2): recent samples dominate, so a backend that
+	// recovers after a slow period rejoins rotation within ~10-20
+	// requests instead of being penalized forever by history.
+	for {
+		old := b.EwmaRespTime.Load()
+		var updated int64
+		if old == 0 {
+			updated = ms
+		} else {
+			updated = old + (ms-old)/5
+		}
+		if b.EwmaRespTime.CompareAndSwap(old, updated) {
+			break
+		}
+	}
 }
 
 func (b *Backend) AvgResponseTime() int64 {
-	count := b.ResponseCount.Load()
-	if count == 0 {
-		return 0
-	}
-	return b.TotalRespTime.Load() / int64(count)
+	return b.EwmaRespTime.Load()
 }
 
 func (b *Backend) LoadScore() int64 {
