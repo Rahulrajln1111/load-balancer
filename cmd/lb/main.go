@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -24,6 +25,13 @@ var defaultBackends = []string{
 }
 
 func main() {
+	// Serve 2500 concurrent keep-alive connections on a 1-core cgroup.
+	// GCPercent 200: balances CPU spent on GC vs memory growth; the 220MiB
+	// soft limit forces collection long before the 512MB cgroup ceiling
+	// (observed 471MB peak with GCPercent 400 during a 2500-burst).
+	debug.SetGCPercent(200)
+	debug.SetMemoryLimit(220 << 20)
+
 	backendURLs := defaultBackends
 	if v := os.Getenv("LB_BACKENDS"); v != "" {
 		backendURLs = strings.Split(v, ",")
