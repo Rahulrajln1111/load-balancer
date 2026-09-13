@@ -2,89 +2,71 @@ package main
 
 import (
 	"context"
-	"load-balancer/internal/backend"
-	"load-balancer/internal/health"
-	"load-balancer/internal/proxy"
-	"load-balancer/internal/scheduler"
-	"load-balancer/internal/server"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"load-balancer/internal/backend"
+	"load-balancer/internal/health"
+	"load-balancer/internal/proxy"
+	"load-balancer/internal/scheduler"
+	"load-balancer/internal/server"
 )
 
-var defaultBackendURLs = []string{
+// Backend endpoints (NAT-mapped public ports of the 3 backend VMs).
+var defaultBackends = []string{
 	"http://10.1.75.51:3290",
 	"http://10.1.75.51:3291",
 	"http://10.1.75.51:3292",
 }
 
-func backendURLs() []string {
-	if v := os.Getenv("LB_BACKENDS"); v != "" {
-		var out []string
-		for _, p := range strings.Split(v, ",") {
-			if s := strings.TrimSpace(p); s != "" {
-				out = append(out, s)
-			}
-		}
-		if len(out) > 0 {
-			return out
-		}
-	}
-	return defaultBackendURLs
-}
-
-func createBackends() []*backend.Backend {
-	var backends []*backend.Backend
-	for _, raw := range backendURLs() {
-
-		target, err := url.Parse(raw)
-
-		if err != nil {
-			log.Fatal("error parsing url")
-		}
-
-		p := proxy.New(target)
-		b := backend.New(target, p)
-		backends = append(backends, b)
-
-	}
-
-	return backends
-}
-
 func main() {
-	backends := createBackends()
+	backendURLs := defaultBackends
+	if v := os.Getenv("LB_BACKENDS"); v != "" {
+		backendURLs = strings.Split(v, ",")
+	}
 
+	backends := make([]*backend.Backend, 0, len(backendURLs))
+	for _, raw := range backendURLs {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			log.Fatal(err)
+		}
+		backends = append(backends, backend.New(u, proxy.New(u)))
+	}
+
+	// Performance-based dynamic scheduling: least-load (power-of-two-choices,
+	// epsilon-greedy) with per-backend in-flight threshold and health awareness.
 	sch := scheduler.NewPerformanceScheduler(backends)
 
-	srvc := server.New(sch, backends)
+	// Active health checking: probe every second, mark down after 3 failures.
+	checker := health.New(backends, time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go checker.Run(ctx)
+	checker.CheckAll(ctx) // probe once before accepting traffic
 
+	srv := server.New(sch, backends)
 	mux := http.NewServeMux()
+	srv.Register(mux)
 
-	srvc.Register(mux)
-
-	// Faster health check interval for better responsiveness under load
-	checker := health.New(backends, time.Second*1)
-
-	rootCtx, stopBackgWorker := context.WithCancel(context.Background())
-
-	defer stopBackgWorker()
-	go checker.Run(rootCtx)
-
-	httpServer := &http.Server{
-		Addr:    ":3000",
-		Handler: mux,
+	addr := ":3000"
+	if v := os.Getenv("LB_PORT"); v != "" {
+		addr = ":" + v
 	}
 
-	log.Println("Load Balancer listening on :3000")
-
-	if err := httpServer.ListenAndServe(); err != nil &&
-		err != http.ErrServerClosed {
-
+	log.Printf("Load Balancer (performance scheduler, %d backends) starting on %s", len(backends), addr)
+	s := &http.Server{
+		Addr:        addr,
+		Handler:     mux,
+		IdleTimeout: 120 * time.Second,
+		// No Read/Write timeouts: WebSocket streams and slow clients must not
+		// be cut mid-flight; per-request deadlines live in the transport.
+	}
+	if err := s.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
-
 }
