@@ -14,17 +14,19 @@ type ErrHolder struct {
 
 func CtxKey() ctxKey { return ctxKey{} }
 
-// Optimized transport for managing up to 2700 concurrent requests
+// Transport sized for 2500+ concurrent clients across 3 backends.
+// Backends ACK /message from a local journal (sub-ms), so per-backend
+// connection limits are the only queue that can stall requests.
 var transport = &http.Transport{
-	MaxIdleConns:        3000,
-	MaxIdleConnsPerHost: 800,
-	MaxConnsPerHost:     1000,
-	IdleConnTimeout:     90 * time.Second,
+	MaxIdleConns:          4000,
+	MaxIdleConnsPerHost:   1200,
+	MaxConnsPerHost:       1600,
+	IdleConnTimeout:       90 * time.Second,
 	ResponseHeaderTimeout: 15 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
-	TLSHandshakeTimeout:  3 * time.Second,
-	DisableKeepAlives:    false,
-	ForceAttemptHTTP2:    true,
+	TLSHandshakeTimeout:   3 * time.Second,
+	DisableKeepAlives:     false,
+	ForceAttemptHTTP2:     true,
 }
 
 func New(target *url.URL) *httputil.ReverseProxy {
