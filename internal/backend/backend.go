@@ -50,6 +50,13 @@ func (b *Backend) ActiveRequest() int64  { return b.InFlight.Load() }
 
 func (b *Backend) RecordResponseTime(d time.Duration) {
 	ms := d.Milliseconds()
+	// Clamp absurd samples (host stalls, queueing spikes). They are noise for
+	// scheduling purposes — a real failure is caught by health checks and the
+	// proxy retry — and one unclamped spike wrecks the EWMA for minutes.
+	const maxSampleMs = 5000
+	if ms > maxSampleMs {
+		ms = maxSampleMs
+	}
 	b.TotalRespTime.Add(ms)
 	b.ResponseCount.Add(1)
 	// EWMA (alpha = 0.2): recent samples dominate, so a backend that

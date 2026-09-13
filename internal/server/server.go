@@ -9,6 +9,7 @@ import (
 	"load-balancer/internal/proxy"
 	"log"
 	"net"
+	"strings"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -103,6 +104,12 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 func (s *Server) forwardToBackend(w http.ResponseWriter, r *http.Request) {
 	s.metrics.Total.Add(1)
 
+	// WebSocket upgrades must NOT count as in-flight requests or contribute
+	// to latency metrics: a WS session lives for minutes, so recording its
+	// duration as a "response time" poisons the scheduler's EWMA and pushes
+	// the backend out of rotation (load score 1030 vs 900 threshold).
+	isWS := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+
 	b := s.scheduler.Next()
 	if b == nil {
 		s.metrics.Failed.Add(1)
@@ -113,17 +120,23 @@ func (s *Server) forwardToBackend(w http.ResponseWriter, r *http.Request) {
 	holder := &proxy.ErrHolder{}
 	r = r.WithContext(context.WithValue(r.Context(), proxy.CtxKey(), holder))
 
-	b.IncInFlight()
+	if !isWS {
+		b.IncInFlight()
+	}
 	b.RecordRequests()
 	aw := &attemptW{ResponseWriter: w}
 
 	start := time.Now()
 	func() {
-		defer b.DecInFlight()
+		if !isWS {
+			defer b.DecInFlight()
+		}
 		b.Proxy.ServeHTTP(aw, r)
 	}()
-	elapsed := time.Since(start)
-	b.RecordResponseTime(elapsed)
+	if !isWS {
+		elapsed := time.Since(start)
+		b.RecordResponseTime(elapsed)
+	}
 
 	if holder.Err != nil {
 		s.metrics.BackendErrors.Add(1)

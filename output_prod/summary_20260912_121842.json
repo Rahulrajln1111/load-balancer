@@ -1,0 +1,55 @@
+{
+  "config": {
+    "base_url": "http://10.1.75.51:3289",
+    "num_users": 5,
+    "duration_sec": 30,
+    "min_msg_len": 10,
+    "max_msg_len": 300,
+    "min_interval_sec": 0.3,
+    "max_interval_sec": 1.2
+  },
+  "results": {
+    "total_message_requests": 144,
+    "total_feed_requests": 38,
+    "total_errors": 0,
+    "duration_sec": 30.03
+  },
+  "message_stats": {
+    "avg_response_ms": 50.74,
+    "min_response_ms": 17.88,
+    "max_response_ms": 252.06,
+    "p50_response_ms": 24.93,
+    "p95_response_ms": 163.02,
+    "p99_response_ms": 227.45
+  },
+  "feed_stats": {
+    "avg_response_ms": 206.38,
+    "min_response_ms": 99.19,
+    "max_response_ms": 759.44,
+    "p50_response_ms": 136.82,
+    "p95_response_ms": 741.86,
+    "p99_response_ms": 759.44
+  },
+  "per_user": {
+    "user_0": {
+      "messages": 27,
+      "errors": 0
+    },
+    "user_1": {
+      "messages": 29,
+      "errors": 0
+    },
+    "user_2": {
+      "messages": 30,
+      "errors": 0
+    },
+    "user_3": {
+      "messages": 28,
+      "errors": 0
+    },
+    "user_4": {
+      "messages": 30,
+      "errors": 0
+    }
+  }
+}
