@@ -2,16 +2,19 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"load-balancer/internal/backend"
 	"load-balancer/internal/proxy"
 	"log"
 	"net"
-	"strings"
 	"net/http"
+	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -110,45 +113,100 @@ func (s *Server) forwardToBackend(w http.ResponseWriter, r *http.Request) {
 	// the backend out of rotation (load score 1030 vs 900 threshold).
 	isWS := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 
-	b := s.scheduler.Next()
-	if b == nil {
-		s.metrics.Failed.Add(1)
-		http.Error(w, "no healthy backend available", http.StatusServiceUnavailable)
-		return
+	// Buffered-body retry: capture the full request body so failed attempts
+	// can be replayed byte-identical to the next backend. Only /message is
+	// retried — it is idempotent server-side (duplicate message IDs are
+	// absorbed by ON CONFLICT DO NOTHING), so a retry can never create a
+	// duplicate row. Turns a backend death from client-visible 502s into an
+	// invisible failover.
+	retryable := r.Method == http.MethodPost && r.URL.Path == "/message"
+	var body []byte
+	if retryable && r.Body != nil {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		body = b
+		// Do NOT close the original body here: ReverseProxy's transport
+		// reads r.Body on every attempt, and the http server closes it
+		// when the handler returns. Each attempt gets a fresh reader below.
 	}
 
 	holder := &proxy.ErrHolder{}
 	r = r.WithContext(context.WithValue(r.Context(), proxy.CtxKey(), holder))
 
-	if !isWS {
-		b.IncInFlight()
-	}
-	b.RecordRequests()
-	aw := &attemptW{ResponseWriter: w}
-
-	start := time.Now()
-	func() {
-		if !isWS {
-			defer b.DecInFlight()
+	for attempt := 1; ; attempt++ {
+		b := s.scheduler.Next()
+		if b == nil {
+			s.metrics.Failed.Add(1)
+			http.Error(w, "no healthy backend available", http.StatusServiceUnavailable)
+			return
 		}
-		b.Proxy.ServeHTTP(aw, r)
-	}()
-	if !isWS {
-		elapsed := time.Since(start)
-		b.RecordResponseTime(elapsed)
-	}
+		if retryable && body != nil {
+			// Fresh reader per attempt: ReverseProxy closes the body after
+			// proxying, so a replay must never reuse a consumed/closed one.
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
 
-	if holder.Err != nil {
-		s.metrics.BackendErrors.Add(1)
+		holder.Err = nil
+		if !isWS {
+			b.IncInFlight()
+		}
+		b.RecordRequests()
+		aw := &attemptW{ResponseWriter: w}
+
+		start := time.Now()
+		func() {
+			if !isWS {
+				defer b.DecInFlight()
+			}
+			b.Proxy.ServeHTTP(aw, r)
+		}()
+		if !isWS {
+			b.RecordResponseTime(time.Since(start))
+		}
+
+		if holder.Err != nil {
+			s.metrics.BackendErrors.Add(1)
+		}
+
+		if holder.Err == nil || aw.wrote {
+			s.metrics.Success.Add(1)
+			return
+		}
+
+		// Backend proved dead mid-flight: trip it now so the retry (and
+		// every other in-flight request) skips it immediately.
+		if isDeadBackendErr(holder.Err) {
+			b.SetAlive(false)
+		}
+
+		if attempt >= 2 || !retryable {
+			s.metrics.Failed.Add(1)
+			http.Error(w, "backend unavailable", http.StatusBadGateway)
+			return
+		}
+		log.Printf("retrying %s: %v", b.URL, holder.Err)
 	}
-	if holder.Err == nil || aw.wrote {
-		s.metrics.Success.Add(1)
-		return
+}
+
+// isDeadBackendErr reports whether a proxy error proves the backend is
+// unreachable (connection refused/reset, host down, no response). Used to
+// trip the backend's alive flag INSTANTLY instead of waiting for the 3-fail
+// health-check threshold — otherwise the scheduler keeps handing out the
+// corpse for seconds and clients see 502s.
+func isDeadBackendErr(err error) bool {
+	if err == nil {
+		return false
 	}
-	// Proxy failed before writing anything: explicit 502 so the
-	// client never mistakes this for an accepted (2xx) request.
-	s.metrics.Failed.Add(1)
-	http.Error(w, "backend unavailable", http.StatusBadGateway)
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +214,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	maxAttempt := 1
 
+	// Only retry read-only methods: POST/PUT/DELETE hit non-idempotent app
+	// routes (room creation, messages) where a blind retry would duplicate
+	// side effects. POST /message retries live in forwardToBackend with
+	// body replay (idempotent there: ON CONFLICT DO NOTHING).
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		maxAttempt = 2
 	}
@@ -194,6 +256,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if holder.Err == nil || aw.wrote {
 			s.metrics.Success.Add(1)
 			return
+		}
+
+		// Backend proved dead mid-flight: trip it now so the retry below
+		// (and every other in-flight request) skips it immediately.
+		if isDeadBackendErr(holder.Err) {
+			b.SetAlive(false)
 		}
 
 		log.Printf("retrying %s: %v", b.URL, holder.Err)
