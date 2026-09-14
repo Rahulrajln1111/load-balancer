@@ -1,49 +1,133 @@
 # Load Balancer (Go)
 
-A production-oriented **Layer 7 HTTP Load Balancer** built from scratch using Go's standard library (`net/http` + `httputil.ReverseProxy`).
+A production-oriented **Layer 7 HTTP Load Balancer** built from scratch with Go's standard library
+(`net/http` + `httputil.ReverseProxy`). It fronts the [chitchat](https://github.com/Rahulrajln1111/chitchat)
+secure group-chat application: three Go backends on three VMs, one shared PostgreSQL, and a single
+public endpoint clients ever need to know.
 
-> **Goal:** Understand how modern load balancers like Envoy, HAProxy, NGINX, and cloud L7 load balancers are engineered internally instead of relying on web frameworks.
-
----
-
-## 🚀 Current Status
-
-### Milestone 1 — Completed ✅
-
-* HTTP reverse proxy using `httputil.ReverseProxy`
-* Round Robin scheduler
-* Concurrent health checker
-* Atomic backend metrics (`Alive`, `InFlight`, `Requests`)
-* Dependency Injection architecture
-* Context-based background worker
-* Multi-backend routing verified
-* Concurrent request testing (`curl` + `xargs`)
+**Public endpoint:** `http://10.1.75.51:3289`
 
 ---
 
-## Architecture
+## What it does
 
 ```text
-                    Client
-                       │
-                 HTTP Request
-                       │
-                net/http Server
-                       │
-                 Server Package
-                       │
-             Scheduler Interface
-                       │
-      ┌────────────────┴───────────────┐
-      │                                │
- Round Robin                  Future Algorithms
- (Implemented)                (P2C / EWMA / WLR)
-                       │
-               Healthy Backend
-                       │
-        httputil.ReverseProxy
-                       │
-          Backend 1 / 2 / 3
+                 Clients (browser / load generators)
+                              |
+                    Load Balancer  :3289 (published via NAT from VM :2289)
+                              |
+        +---------------------+---------------------+
+        |                     |                     |
+   Backend 1             Backend 2             Backend 3 + PostgreSQL
+ VM :2290 -> :3000     VM :2291 -> :3000      VM :2292 -> :3000 / :5432
+  172.17.0.91           172.17.0.92              172.17.0.93
+```
+
+- `POST /message` — accepts `client-name` and `msg`, submits a message (exact assignment route)
+- `GET /feed` — retrieves all messages (exact assignment route)
+- `GET /health`, `GET /status` — LB and backend observability
+- `/ws` and all chat-app routes — proxied with WebSocket upgrade support
+
+---
+
+## Implemented Features
+
+### Performance-based dynamic scheduling (no plain round-robin)
+
+`internal/scheduler/performance.go` implements **power-of-two-choices least-load with
+epsilon-greedy exploration**:
+
+1. Global in-flight cap (2700): at capacity, new work drains to the least-loaded backend.
+2. Candidate filter: alive backends whose active requests are below the per-backend
+   threshold (900). If none qualify, fall back to least-loaded-alive.
+3. With 5% probability pick a random healthy backend (explores and corrects drift).
+4. Otherwise sample **two** candidates and pick the one with the lower load score
+   (active requests + capped EWMA latency penalty).
+
+EWMA samples are capped so a single slow response (e.g. a stalled probe) can never poison
+the score, and **WebSocket sessions are excluded** from in-flight/latency metrics — a long-lived
+WS connection must not look like a hanging HTTP request.
+
+### Health checking and instant circuit breaking
+
+- Active probes every 1 s (2 s timeout); 3 consecutive failures take a backend out of rotation.
+- Passive breaker: a connection-refused/reset marks a backend dead **immediately**, so the
+  retry lands on a live backend instead of a corpse.
+
+### Failover with body-replay retry
+
+`/message` and `/feed` requests are retried on the next backend if the first attempt fails
+at the connection level. The request body is buffered and replayed byte-identical; duplicate
+storage is impossible because the backend deduplicates on message ID (`ON CONFLICT DO NOTHING`).
+Non-idempotent chat-app routes are never retried.
+
+### Memory governance (512 MB cgroups)
+
+- LB: `GOMEMLIMIT` from `lb.env` plus in-code `GCPercent(200)` and a 220 MiB soft memory
+  limit — GC acts long before the cgroup OOM wall.
+- Backends: `GOMEMLIMIT 260/180 MiB`, capped pgx pool, per-VM watchdogs restart any dead
+  process in ~2 s with the correct environment.
+
+### Transport tuning
+
+`MaxIdleConns 4000 / MaxIdleConnsPerHost 1200 / MaxConnsPerHost 1600`, no server-side
+Read/Write timeouts (WebSocket streams and slow clients must not be cut mid-flight;
+per-request deadlines live in the transport).
+
+---
+
+## Configuration
+
+| Env var       | Default                  | Meaning                                  |
+| ------------- | ------------------------ | ---------------------------------------- |
+| `LB_PORT`     | `3000`                   | Listen port (deployed as `3289`)         |
+| `LB_BACKENDS` | `http://10.1.75.51:3290/91/92` | Comma-separated backend URLs       |
+| `GOMEMLIMIT`  | unset                    | Go soft memory limit (set in `lb.env`)   |
+
+IPs and ports of the allotted systems are fixed; no configuration changes them.
+
+---
+
+## Build and Run
+
+```bash
+go build -o lb ./cmd/lb
+set -a; . ./lb.env; set +a   # optional env (GOMEMLIMIT, LB_PORT)
+./lb
+```
+
+---
+
+## Testing
+
+```bash
+# single request through the LB
+curl http://localhost:3289/health
+
+# post a message and read the feed
+curl -X POST http://10.1.75.51:3289/message \
+     -H 'Content-Type: application/json' \
+     -d '{"client-name":"alice","msg":"hello"}'
+curl http://10.1.75.51:3289/feed
+
+# concurrent burst
+seq 2000 | xargs -P200 -I{} curl -s -o /dev/null -w "%{http_code}\n" \
+     -X POST http://10.1.75.51:3289/message \
+     -H 'Content-Type: application/json' \
+     -d '{"client-name":"burst","msg":"load test"}' | sort | uniq -c
+```
+
+### Load generator
+
+`load_generator.py` (this repo) and the more full-featured
+[`tools/loadgen/loadgen.py`](https://github.com/Rahulrajln1111/chitchat) in the app repo
+implement the assignment's own-generator requirement: variable users, random message
+lengths, random intervals, latency percentiles, and 4-VM utilization sampling.
+
+```bash
+python3 tools/loadgen/loadgen.py --url http://10.1.75.51:3289 \
+    --ramp 100,500,1000,2500 --duration 20 \
+    --msg-min 10 --msg-max 500 --think-min 0 --think-max 50 --sample-util
 ```
 
 ---
@@ -51,220 +135,26 @@ A production-oriented **Layer 7 HTTP Load Balancer** built from scratch using Go
 ## Project Structure
 
 ```text
-internal/
-├── backend/
-│   └── backend.go
-│
-├── proxy/
-│   └── proxy.go
-│
-├── scheduler/
-│   ├── interface.go
-│   └── round_robin.go
-│
-├── server/
-│   └── server.go
-│
-└── health/
-    └── checker.go
-
-cmd/
-└── lb/
-    └── main.go
-```
-
-Each package owns a **single responsibility**, making scheduler implementations pluggable.
-
----
-
-## Implemented Features
-
-### Reverse Proxy
-
-* Transparent request forwarding
-* Backend isolation
-* Header preservation
-
-### Round Robin
-
-Current scheduler rotates requests fairly across healthy backends.
-
-Example:
-
-```text
-1 → Backend-1
-2 → Backend-2
-3 → Backend-3
-4 → Backend-1
-```
-
-### Health Checking
-
-Every backend exposes:
-
-```http
-GET /health
-```
-
-A concurrent health worker periodically updates backend availability without blocking request handling.
-
-### Atomic Metrics
-
-Every backend maintains thread-safe runtime state:
-
-| Metric     | Description           |
-| ---------- | --------------------- |
-| `Alive`    | Health status         |
-| `InFlight` | Active requests       |
-| `Requests` | Total served requests |
-
----
-
-## Testing
-
-### Sequential
-
-```bash
-curl http://localhost:8080/1
-```
-
-### Concurrent
-
-```bash
-seq 30 | xargs -P30 -I{} curl -s http://localhost:8080/1
-```
-
-### Fairness Verification
-
-```bash
-seq 300 \
-| xargs -P50 -I{} curl -s http://localhost:8080/1 \
-| sort \
-| uniq -c
-```
-
-Expected distribution:
-
-```text
-100 Backend-1
-100 Backend-2
-100 Backend-3
+cmd/lb/main.go            entrypoint: backends, scheduler, health checker, GC tuning
+internal/backend/         backend state: alive, in-flight, EWMA, load score
+internal/proxy/           tuned httputil.ReverseProxy transport
+internal/scheduler/       performance scheduler (P2C + epsilon-greedy), round-robin (legacy)
+internal/server/          routing, /message + /feed retry, circuit breaker, WS proxy
+internal/health/          active health checker
+load_generator.py         simple load generator
 ```
 
 ---
 
-# 🎯 Modern Load Balancing Roadmap
+## Results (see chitchat repo `report/REPORT.pdf`)
 
-This project will evolve beyond Round Robin into **three production-grade scheduling algorithms** commonly used in modern service meshes and cloud load balancers.
-
-## 1. Power of Two Choices (Least Request) ⭐
-
-**Priority:** Next Implementation
-
-Instead of scanning every backend, randomly sample **two healthy servers** and choose the one with fewer active requests.
-
-```text
-Random Pick
-     │
- ┌───┴────┐
- │        │
-B1(12)  B3(4)
- │        │
- └──► Choose B3
-```
-
-### Why it's modern
-
-* O(1) scheduling
-* Excellent load distribution
-* Handles uneven traffic much better than Round Robin
-* Foundation of modern Envoy deployments
-
----
-
-## 2. Weighted Least Request
-
-Real production clusters contain machines with different capacities.
-
-Example:
-
-```text
-Backend-A : 4 CPU
-Backend-B : 16 CPU
-Backend-C : 32 CPU
-```
-
-Instead of treating them equally, scheduling considers **capacity weight** together with active requests.
-
-```text
-Higher Weight
-      +
-Lower Active Requests
-      │
-      ▼
-Best Backend
-```
-
-This enables heterogeneous infrastructure without wasting larger machines.
-
----
-
-## 3. Peak EWMA (Latency-Aware Scheduling)
-
-The most advanced scheduler in this project.
-
-Rather than choosing the least busy server, it continuously learns backend latency using an **Exponentially Weighted Moving Average (EWMA)**.
-
-```text
-Observed Latency
-      │
-      ▼
- EWMA Calculator
-      │
-      ▼
-Latency Score
-      │
-      ▼
-Select Fastest Healthy Backend
-```
-
-Advantages:
-
-* Automatically avoids slow servers
-* Adapts to latency spikes
-* Better tail-latency under real workloads
-* Used in modern microservice environments
-
----
-
-## Development Timeline
-
-| Phase                  | Status      |
-| ---------------------- | ----------- |
-| Reverse Proxy          | ✅ Completed |
-| Round Robin            | ✅ Completed |
-| Health Checker         | ✅ Completed |
-| Power of Two Choices   | 🔜 Next     |
-| Weighted Least Request | ⏳ Planned   |
-| Peak EWMA              | ⏳ Planned   |
-| Graceful Shutdown      | ⏳ Planned   |
-| Metrics Endpoint       | ⏳ Planned   |
-| Prometheus Integration | ⏳ Planned   |
-| Kubernetes Ready       | ⏳ Planned   |
+- Official harness final run: **feed persistence 100%, correctness 100%, 0 lost messages**
+- Own-generator validation: 60,000 requests across static + breakpoint boards, 0 errors,
+  byte-exact random samples after every stage; backend SIGKILL mid-flood with
+  **0 client-visible errors** (failover + watchdog revival + journal replay)
 
 ---
 
 ## Technologies
 
-* **Go**
-* `net/http`
-* `httputil.ReverseProxy`
-* `context`
-* `sync/atomic`
-* Goroutines & WaitGroup
-
----
-
-## Vision
-
-The objective is **not** to clone an existing load balancer, but to progressively engineer one by implementing modern scheduling algorithms, concurrency primitives, health monitoring, graceful shutdown, observability, and production-ready networking from first principles.
+Go · `net/http` · `httputil.ReverseProxy` · `sync/atomic` · goroutines · pgx (backends)
